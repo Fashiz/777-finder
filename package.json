@@ -1,3 +1,13 @@
-"scripts": {
-  "start": "node 777-finder.js"
+{
+  "name": "777-finder",
+  "version": "1.0.0",
+  "description": "FiveM Server Finder Bot",
+  "main": "777-finder.js",
+  "scripts": {
+    "start": "node 777-finder.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "undici": "^6.0.0"
+  }
 }
