@@ -5,7 +5,7 @@ const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] 
 });
 
-const TOKEN = 'env.DISCORD_TOKEN'; 
+const TOKEN = process.env.TOKEN; 
 const PREFIX = '!';
 
 const serverData = [
@@ -199,3 +199,4 @@ client.on('messageCreate', async (message) => {
 
 
 client.login(TOKEN);
+
