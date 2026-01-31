@@ -44,7 +44,7 @@ const serverData = [
     { name: "Chronicle Roleplay Indo", alias: "chronicle", cfx: "bammal" },
     { name: "Kotakita Roleplay", alias: "kotakita", cfx: "r35px8" },
     { name: "Satu Mimpi", alias: "satumimpi", cfx: "3e3gdb" },
-    { name: "Jing Arena Indonesia", alias: "jing", cfx: "6gqrq4" },
+    { name: "Jing Arena Indonesia", alias: "jing", cfx: "53k9ra" },
     { name: "Senpai arena", alias: "senpai", cfx: "3mg36b" },
     { name: "caur ffa", alias: "caur", cfx: "vx7685" },
     { name: "Coffe shop 45", alias: "coffee", cfx: "javo7a" },
@@ -193,3 +193,4 @@ client.on('messageCreate', async (message) => {
 });
 
 client.login(TOKEN);
+
