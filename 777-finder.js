@@ -36,7 +36,7 @@ const serverData = [
     { name: "DayDream Roleplay", alias: "daydream", cfx: "4zqglv" },
     { name: "Sentra Nusantara RP", alias: "sentra", cfx: "vagdok" },
     { name: "Kota bagus nusantara RP", alias: "bagus", cfx: "3eqozy" },
-    { name: "Our Glory roleplay", alias: "our", cfx: "89zggb" },
+    { name: "Our Glory roleplay", alias: "our", cfx: "55k88a" },
     { name: "Senjakala roleplay", alias: "senja", cfx: "z5oaqp" },
     { name: "Hexos Rp", alias: "hexos", cfx: "rmz57j" },
     { name: "Origami Roleplay", alias: "origami", cfx: "plj9dy" },
@@ -193,5 +193,6 @@ client.on('messageCreate', async (message) => {
 });
 
 client.login(TOKEN);
+
 
 
