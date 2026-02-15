@@ -159,9 +159,9 @@ client.on('messageCreate', async (message) => {
 
                 // kalau keyword "rd" → wajib diawali RD (RD / RD<spasi> / RD-)
                 if (keyword === 'rd') {
-                    return /^rd(\s|-|$)/i.test(p.name || '');
-                }
-
+            // boleh: "RD..." atau "L RD..." atau "K RD..." (case-insensitive)
+            return /^(?:[lk]\s+)?rd(\s|-|$)/i.test(p.name || '');
+            }
                 // keyword lain → normal contains
                 return name.includes(keyword);
             });
@@ -213,3 +213,4 @@ client.on('messageCreate', async (message) => {
 });
 
 client.login(TOKEN);
+
