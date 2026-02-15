@@ -145,12 +145,28 @@ client.on('messageCreate', async (message) => {
             if (!response.ok) throw new Error();
             const resData = await response.json();
             const data = resData.Data;
-            const players = data.players || [];
-            const cleanHost = data.hostname.replace(/\^./g, '').trim().toUpperCase();
 
+            // NOTE: tetap aman kalau API ngasih "players"
+            const players = data.players || [];
+
+            const cleanHost = (data.hostname || 'UNKNOWN SERVER').replace(/\^./g, '').trim().toUpperCase();
+
+            // ====== FIX FILTER (RD harus di depan) ======
             const keyword = (sub && sub !== 'players') ? sub.toLowerCase() : "";
-            const filtered = players.filter(p => p.name.toLowerCase().includes(keyword));
-            
+
+            const filtered = players.filter(p => {
+                const name = (p.name || '').toLowerCase();
+
+                // kalau keyword "rd" → wajib diawali RD (RD / RD<spasi> / RD-)
+                if (keyword === 'rd') {
+                    return /^rd(\s|-|$)/i.test(p.name || '');
+                }
+
+                // keyword lain → normal contains
+                return name.includes(keyword);
+            });
+            // ===========================================
+
             let page = 0;
             const items = 20; 
             const totalPages = Math.ceil(filtered.length / items);
@@ -158,8 +174,9 @@ client.on('messageCreate', async (message) => {
             const generateEmbed = (p) => {
                 const list = filtered.slice(p * items, (p + 1) * items).map((pl, i) => {
                     const idx = ((p * items) + i + 1).toString().padStart(2, ' ');
-                    const id = pl.id.toString().padEnd(4, ' '); 
-                    return `${idx}. (${id}) ${pl.name.slice(0, 35)}`;
+                    const id = (pl.id ?? '').toString().padEnd(4, ' '); 
+                    const nm = (pl.name || '').slice(0, 35);
+                    return `${idx}. (${id}) ${nm}`;
                 }).join('\n');
                 
                 return new EmbedBuilder()
@@ -179,11 +196,14 @@ client.on('messageCreate', async (message) => {
 
             col.on('collect', async i => {
                 if (i.user.id !== message.author.id) return i.reply({ content: "Unauthorized.", ephemeral: true });
+
                 i.customId === 'p' ? page-- : page++;
+
                 const newRow = new ActionRowBuilder().addComponents(
                     new ButtonBuilder().setCustomId('p').setLabel('PREV').setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
                     new ButtonBuilder().setCustomId('n').setLabel('NEXT').setStyle(ButtonStyle.Success).setDisabled(page === totalPages - 1)
                 );
+
                 await i.update({ embeds: [generateEmbed(page)], components: [newRow] });
             });
         } catch (e) {
@@ -193,6 +213,3 @@ client.on('messageCreate', async (message) => {
 });
 
 client.login(TOKEN);
-
-
-
