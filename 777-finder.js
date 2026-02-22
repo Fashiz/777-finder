@@ -107,10 +107,22 @@ function resolveTargetId(input) {
   return found ? found.cfx : input;
 }
 
+// --- fetch timeout helper (biar loop nggak nyangkut lama) ---
+async function fetchWithTimeout(url, options = {}, timeoutMs = 6500) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 async function fetchServer(targetId) {
-  const res = await fetch(
+  const res = await fetchWithTimeout(
     `https://servers-frontend.fivem.net/api/servers/single/${targetId}`,
-    { headers: { "User-Agent": "Mozilla/5.0" } }
+    { headers: { "User-Agent": "Mozilla/5.0" } },
+    6500
   );
   if (!res.ok) throw new Error("fetch failed");
   const json = await res.json();
@@ -121,12 +133,17 @@ function cleanHostname(hostname) {
   return (hostname || "UNKNOWN SERVER").replace(/\^./g, "").trim().toUpperCase();
 }
 
+// jam HH:MM:SS (local mesin bot)
+function nowTime() {
+  const d = new Date();
+  return d.toLocaleTimeString([], { hour12: false });
+}
+
 // ================= WATCH SYSTEM =================
 const watchSessions = new Map(); // msgId -> session
 
-// ✅ PERCEPAT DI SINI (lebih cepet notif)
-const WATCH_INTERVAL = 8000; // 8 detik (aman). Kalau mau lebih cepet: 5000
-
+// ✅ Lebihin cepat (tapi jangan kebangetan biar ga timeout/rate limit)
+const WATCH_INTERVAL = 5000; // 5 detik
 const WATCH_ITEMS = 20;
 
 // Build embed for watch/find list
@@ -211,8 +228,13 @@ async function refreshWatch(session, messageToEdit) {
 
 function startWatchLoop(session) {
   if (session.interval) clearInterval(session.interval);
+  if (session.inFlight) return;
 
   session.interval = setInterval(async () => {
+    // anti numpuk kalau request sebelumnya belum selesai
+    if (session.inFlight) return;
+    session.inFlight = true;
+
     try {
       const channel = await client.channels.fetch(session.channelId).catch(() => null);
       if (!channel || !channel.isTextBased()) return;
@@ -221,8 +243,8 @@ function startWatchLoop(session) {
       const players = data.players || [];
       const filtered = players.filter((p) => matchesAllTokens(p.name || "", session.tokens));
 
-      // ✅ PAKAI MAP BIAR LEFT PUNYA NAMA
-      const currentMap = new Map(filtered.map((p) => [p.id, p.name || "UNKNOWN"]));
+      // ✅ PAKSA ID JADI STRING biar map cocok terus
+      const currentMap = new Map(filtered.map((p) => [String(p.id), p.name || "UNKNOWN"]));
       const beforeMap = session.previousMap || new Map();
 
       const joined = [];
@@ -238,22 +260,26 @@ function startWatchLoop(session) {
       // update snapshot
       session.previousMap = currentMap;
 
-      // notif join/leave (format list biasa)
+      const t = nowTime();
+
+      // notif join/leave + jam
       if (joined.length > 0) {
         channel.send(
           `🟢 **${session.queryLabel.toUpperCase()} JOINED**\n` +
-            joined.map((p) => `+ (${p.id}) ${p.name}`).join("\n")
+            joined.map((p) => `+ (${p.id}) ${p.name} — ${t}`).join("\n")
         );
       }
 
       if (left.length > 0) {
         channel.send(
           `🔴 **${session.queryLabel.toUpperCase()} LEFT**\n` +
-            left.map((p) => `- (${p.id}) ${p.name}`).join("\n")
+            left.map((p) => `- (${p.id}) ${p.name} — ${t}`).join("\n")
         );
       }
     } catch {
       // no spam
+    } finally {
+      session.inFlight = false;
     }
   }, WATCH_INTERVAL);
 }
@@ -263,6 +289,7 @@ function stopWatchLoop(session) {
     clearInterval(session.interval);
     session.interval = null;
   }
+  session.inFlight = false;
 }
 
 // ================= READY =================
@@ -321,7 +348,7 @@ client.on("messageCreate", async (message) => {
   // ===== FIND (TETEP) =====
   if (command === "find") {
     const input = args[0];
-    if (!input) return message.reply("Gunakan `!find <alias>`.");
+    if (!input) return message.reply("Gunakan `!find <alias>`."); // fix minor
 
     const query = args.slice(1).join(" ");
     const tokens = parseQueryTokens(query);
@@ -403,7 +430,7 @@ client.on("messageCreate", async (message) => {
   // ===== WATCH (LIST + PAGING + REFRESH + TRACK) =====
   if (command === "watch") {
     const input = args[0];
-    if (!input) return message.reply("Gunakan `!watch <alias> <query>`.");
+    if (!input) return message.reply("Gunakan `!watch <alias> <query>`."); // fix minor
 
     const query = args.slice(1).join(" ");
     const tokens = parseQueryTokens(query);
@@ -437,9 +464,10 @@ client.on("messageCreate", async (message) => {
 
         watchOn: false,
         interval: null,
+        inFlight: false,
 
-        // ✅ snapshot Map biar LEFT ada nama
-        previousMap: new Map(filtered.map((p) => [p.id, p.name || "UNKNOWN"])),
+        // ✅ snapshot Map biar LEFT ada nama + key string
+        previousMap: new Map(filtered.map((p) => [String(p.id), p.name || "UNKNOWN"])),
       };
 
       const embed = buildListEmbed({
@@ -490,18 +518,17 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   if (action === "watch_refresh") {
-    // refresh + snapshot ikut diupdate biar tracking akurat setelah refresh manual
-    const filtered = await refreshWatch(session, interaction.message);
-    session.previousMap = new Map(filtered.map((p) => [p.id, p.name || "UNKNOWN"]));
+    // ✅ JANGAN reset snapshot di refresh (ini yang bikin notif ga muncul)
+    await refreshWatch(session, interaction.message);
     return;
   }
 
   if (action === "watch_toggle") {
     session.watchOn = !session.watchOn;
 
-    // refresh sekali pas toggle ON biar data paling baru
-    const filtered = await refreshWatch(session, interaction.message);
-    session.previousMap = new Map(filtered.map((p) => [p.id, p.name || "UNKNOWN"]));
+    // refresh sekali pas toggle ON biar data paling baru (tapi snapshot jangan dipaksa sama persis)
+    // Kita cuma update panel, snapshot biar loop yang handle join/left.
+    await refreshWatch(session, interaction.message);
 
     if (session.watchOn) startWatchLoop(session);
     else stopWatchLoop(session);
