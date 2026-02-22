@@ -21,6 +21,7 @@ const TOKEN = process.env.TOKEN;
 const PREFIX = "!";
 
 // ================= SERVER DATA =================
+// ⚠️ PASTE LIST SERVER 40 LU DI SINI (yang panjang itu)
 const serverData = [
   { name: "Indopride Roleplay", alias: "idp", cfx: "237yxy" },
   { name: "Nagara", alias: "nagara", cfx: "d7vrzd" },
@@ -78,7 +79,7 @@ const parseQueryTokens = (raw) => {
   const s = (raw || "").trim();
   if (!s) return [];
   const tokens = [];
-  const re = /"([^"]+)"|(\S+)/g;
+  const re = /"([^"]+)"|(\S+)/g; // support quotes
   let m;
   while ((m = re.exec(s)) !== null) {
     const t = normalize(m[1] || m[2]);
@@ -116,27 +117,16 @@ async function fetchServer(targetId) {
   return json.Data;
 }
 
-// ✅ burst retry biar lebih cepet “nangkep” update API yang nyusul dikit
-async function fetchServerWithRetry(targetId, retries = 3, waitMs = 2000) {
-  let lastErr;
-  for (let i = 0; i < retries; i++) {
-    try {
-      return await fetchServer(targetId);
-    } catch (e) {
-      lastErr = e;
-    }
-    await new Promise((r) => setTimeout(r, waitMs));
-  }
-  throw lastErr;
-}
-
 function cleanHostname(hostname) {
   return (hostname || "UNKNOWN SERVER").replace(/\^./g, "").trim().toUpperCase();
 }
 
 // ================= WATCH SYSTEM =================
 const watchSessions = new Map(); // msgId -> session
-const WATCH_INTERVAL = 10000; // ✅ 10 detik (lebih cepat)
+
+// ✅ PERCEPAT DI SINI (lebih cepet notif)
+const WATCH_INTERVAL = 8000; // 8 detik (aman). Kalau mau lebih cepet: 5000
+
 const WATCH_ITEMS = 20;
 
 // Build embed for watch/find list
@@ -191,7 +181,7 @@ function buildWatchRow(session) {
 }
 
 async function refreshWatch(session, messageToEdit) {
-  const data = await fetchServerWithRetry(session.targetId);
+  const data = await fetchServer(session.targetId);
   const players = data.players || [];
   const filtered = players.filter((p) => matchesAllTokens(p.name || "", session.tokens));
 
@@ -200,6 +190,7 @@ async function refreshWatch(session, messageToEdit) {
   session.totalClients = data.clients || filtered.length;
   session.totalPages = Math.max(1, Math.ceil(filtered.length / WATCH_ITEMS));
 
+  // clamp page
   if (session.page >= session.totalPages) session.page = session.totalPages - 1;
   if (session.page < 0) session.page = 0;
 
@@ -226,13 +217,13 @@ function startWatchLoop(session) {
       const channel = await client.channels.fetch(session.channelId).catch(() => null);
       if (!channel || !channel.isTextBased()) return;
 
-      const data = await fetchServerWithRetry(session.targetId);
+      const data = await fetchServer(session.targetId);
       const players = data.players || [];
       const filtered = players.filter((p) => matchesAllTokens(p.name || "", session.tokens));
 
-      // ✅ simpan id->name supaya LEFT bisa kasih nama
-      const currentMap = new Map(filtered.map((p) => [p.id, p.name]));
-      const beforeMap = session.previousMap;
+      // ✅ PAKAI MAP BIAR LEFT PUNYA NAMA
+      const currentMap = new Map(filtered.map((p) => [p.id, p.name || "UNKNOWN"]));
+      const beforeMap = session.previousMap || new Map();
 
       const joined = [];
       for (const [id, name] of currentMap.entries()) {
@@ -247,6 +238,7 @@ function startWatchLoop(session) {
       // update snapshot
       session.previousMap = currentMap;
 
+      // notif join/leave (format list biasa)
       if (joined.length > 0) {
         channel.send(
           `🟢 **${session.queryLabel.toUpperCase()} JOINED**\n` +
@@ -290,7 +282,7 @@ client.on("messageCreate", async (message) => {
       const results = await Promise.all(
         serverData.map(async (s) => {
           try {
-            const data = await fetchServerWithRetry(s.cfx);
+            const data = await fetchServer(s.cfx);
             return { ...s, players: data?.clients || 0, status: true };
           } catch {
             return { ...s, players: 0, status: false };
@@ -326,7 +318,7 @@ client.on("messageCreate", async (message) => {
     }
   }
 
-  // ===== FIND =====
+  // ===== FIND (TETEP) =====
   if (command === "find") {
     const input = args[0];
     if (!input) return message.reply("Gunakan `!find <alias>`.");
@@ -337,7 +329,7 @@ client.on("messageCreate", async (message) => {
 
     try {
       const loading = await message.reply("`Syncing data...`");
-      const data = await fetchServerWithRetry(targetId);
+      const data = await fetchServer(targetId);
 
       const players = data.players || [];
       const filtered = players.filter((p) => matchesAllTokens(p.name || "", tokens));
@@ -371,7 +363,11 @@ client.on("messageCreate", async (message) => {
           .setDisabled(totalPages <= 1)
       );
 
-      const msg = await loading.edit({ content: null, embeds: [makeEmbed(0)], components: [row] });
+      const msg = await loading.edit({
+        content: null,
+        embeds: [makeEmbed(0)],
+        components: [row],
+      });
 
       const col = msg.createMessageComponentCollector({ time: 300000 });
       col.on("collect", async (i) => {
@@ -404,7 +400,7 @@ client.on("messageCreate", async (message) => {
     }
   }
 
-  // ===== WATCH =====
+  // ===== WATCH (LIST + PAGING + REFRESH + TRACK) =====
   if (command === "watch") {
     const input = args[0];
     if (!input) return message.reply("Gunakan `!watch <alias> <query>`.");
@@ -416,7 +412,7 @@ client.on("messageCreate", async (message) => {
 
     try {
       const loading = await message.reply("`Creating watch panel...`");
-      const data = await fetchServerWithRetry(targetId);
+      const data = await fetchServer(targetId);
 
       const players = data.players || [];
       const filtered = players.filter((p) => matchesAllTokens(p.name || "", tokens));
@@ -425,18 +421,25 @@ client.on("messageCreate", async (message) => {
         messageId: null,
         authorId: message.author.id,
         channelId: message.channel.id,
+
         inputAlias: input,
         targetId,
+
         tokens,
         queryLabel,
+
         title: cleanHostname(data.hostname),
         totalClients: data.clients || filtered.length,
+
         filtered,
         page: 0,
         totalPages: Math.max(1, Math.ceil(filtered.length / WATCH_ITEMS)),
+
         watchOn: false,
         interval: null,
-        previousMap: new Map(filtered.map((p) => [p.id, p.name])), // ✅ store names
+
+        // ✅ snapshot Map biar LEFT ada nama
+        previousMap: new Map(filtered.map((p) => [p.id, p.name || "UNKNOWN"])),
       };
 
       const embed = buildListEmbed({
@@ -487,27 +490,29 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   if (action === "watch_refresh") {
-    // ✅ refresh panel doang, JANGAN reset baseline (biar tracking jalan terus)
-    await refreshWatch(session, interaction.message);
+    // refresh + snapshot ikut diupdate biar tracking akurat setelah refresh manual
+    const filtered = await refreshWatch(session, interaction.message);
+    session.previousMap = new Map(filtered.map((p) => [p.id, p.name || "UNKNOWN"]));
     return;
   }
 
   if (action === "watch_toggle") {
     session.watchOn = !session.watchOn;
 
-    // refresh sekali biar data fresh (baseline update)
+    // refresh sekali pas toggle ON biar data paling baru
     const filtered = await refreshWatch(session, interaction.message);
-    session.previousMap = new Map(filtered.map((p) => [p.id, p.name]));
+    session.previousMap = new Map(filtered.map((p) => [p.id, p.name || "UNKNOWN"]));
 
     if (session.watchOn) startWatchLoop(session);
     else stopWatchLoop(session);
 
+    // update tombol label
     const row = buildWatchRow(session);
     await interaction.message.edit({ components: [row] });
     return;
   }
 
-  // page change
+  // update embed on page change (tanpa fetch biar cepet)
   const embed = buildListEmbed({
     title: session.title,
     queryLabel: session.queryLabel,
