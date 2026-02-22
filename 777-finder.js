@@ -86,32 +86,52 @@ client.on("messageCreate", async (message) => {
   const command = args.shift().toLowerCase();
 
   // ================= SERVER =================
-  if (command === "server") {
-    const loading = await message.reply("Fetching server list...");
+  // === COMMAND SERVER (BALIK KE STYLE LAMA) ===
+if (command === "server") {
+  const loadingMsg = await message.reply("`🔄 Fetching real-time leaderboard data...`");
+  try {
     const results = await Promise.all(
       serverData.map(async (s) => {
         try {
-          const data = await fetchServer(s.cfx);
-          return { ...s, players: data.clients || 0 };
+          const res = await fetch(
+            `https://servers-frontend.fivem.net/api/servers/single/${s.cfx}`,
+            { headers: { "User-Agent": "Mozilla/5.0" } }
+          );
+          const json = await res.json();
+          return { ...s, players: json.Data?.clients || 0, status: true };
         } catch {
-          return { ...s, players: 0 };
+          return { ...s, players: 0, status: false };
         }
       })
     );
 
     results.sort((a, b) => b.players - a.players);
 
-    const desc = results
-      .map((s, i) => `${i + 1}. ${s.name} - ${s.players} players`)
-      .join("\n");
+    const formatLine = (s, i) => {
+      const st = s.status ? "✅" : "❌";
+      const no = (i + 1).toString().padEnd(2, " ");
+      const name = s.name.toUpperCase().slice(0, 20).padEnd(20, " ");
+      const plys = `[${s.players.toString().padStart(4, " ")}]`.padEnd(6, " ");
+      return `${st} ${no} ${name} ${plys} ${s.alias}`;
+    };
 
     const embed = new EmbedBuilder()
       .setColor("#F1C40F")
-      .setTitle("🏆 FiveM Server Leaderboard")
-      .setDescription(desc);
+      .setTitle("🏆 FiveM Cfx Finder")
+      .setDescription(
+        `\`\`\`\nTotal Server: ${serverData.length} Monitored\nSorted By: Player Count\n\`\`\`\n` +
+          `\`\`\`\nSt No Nama Server           Plys   Alias\n── ── ──────────────────── ────── ─────────\n` +
+          `${results.slice(0, 14).map((s, i) => formatLine(s, i)).join("\n")}\n\`\`\`` +
+          `\`\`\`\n${results.slice(14, 28).map((s, i) => formatLine(s, i + 14)).join("\n")}\n\`\`\`` +
+          `\`\`\`\n${results.slice(28, 40).map((s, i) => formatLine(s, i + 28)).join("\n")}\n\`\`\``
+      )
+      .setFooter({ text: `777 PROJECT || ${new Date().toLocaleTimeString()}` });
 
-    loading.edit({ content: null, embeds: [embed] });
+    await loadingMsg.edit({ content: null, embeds: [embed] });
+  } catch (err) {
+    loadingMsg.edit("`❌ Gagal mengambil data leaderboard.`");
   }
+}
 
   // ================= FIND =================
   if (command === "find") {
@@ -337,3 +357,4 @@ client.on("interactionCreate", async (interaction) => {
 });
 
 client.login(TOKEN);
+
