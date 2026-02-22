@@ -23,10 +23,46 @@ const PREFIX = "!";
 // ================= SERVER DATA =================
 // ⚠️ PASTE LIST SERVER 40 LU DI SINI (yang panjang itu)
 const serverData = [
-  // contoh:
-  // { name: "Indopride Roleplay", alias: "idp", cfx: "237yxy" },
-  // { name: "Nagara", alias: "nagara", cfx: "d7vrzd" },
-  // ...
+  { name: "Indopride Roleplay", alias: "idp", cfx: "237yxy" },
+  { name: "Nagara", alias: "nagara", cfx: "d7vrzd" },
+  { name: "Nusa V", alias: "nusav", cfx: "ele3bm" },
+  { name: "Amora State Indonesia", alias: "amora", cfx: "lk6x85" },
+  { name: "Victoria", alias: "vic", cfx: "3qjvrz" },
+  { name: "Ime Roleplay", alias: "imerp", cfx: "zrvmg4" },
+  { name: "Town Glorix Roleplay", alias: "glorix", cfx: "bjyd8b" },
+  { name: "Cerita Kita Roleplay", alias: "cerita", cfx: "zxmea5" },
+  { name: "Executive RP", alias: "exe", cfx: "roek67" },
+  { name: "Cerita Roleplayku Indo", alias: "ceritaku", cfx: "pmj7by" },
+  { name: "Kotabaru Roleplay", alias: "kotabaru", cfx: "mez5p7" },
+  { name: "Last Paradise RP Indo", alias: "last", cfx: "8rvzg5" },
+  { name: "Solova Roleplay", alias: "solova", cfx: "8rvzg5" },
+  { name: "Bersama Kita Roleplay", alias: "bersama", cfx: "g6aylq" },
+  { name: "Dunia Roleplay", alias: "dunia", cfx: "kr3glr" },
+  { name: "Kingdom Roleplay Indo", alias: "kingdom", cfx: "7g6vzb" },
+  { name: "Savana Roleplay", alias: "savana", cfx: "3vgq5o" },
+  { name: "Noctis indonesia", alias: "noc", cfx: "8r5lp3" },
+  { name: "Impian Kita V2", alias: "impian", cfx: "drjjpj" },
+  { name: "Kota indah indonesia", alias: "indah", cfx: "o47de7" },
+  { name: "Mercy Roleplay", alias: "mercy", cfx: "xj9l5r" },
+  { name: "Gempita Roleplay Indo", alias: "gempita", cfx: "gmgx7q" },
+  { name: "Signature Roleplay Indo", alias: "signature", cfx: "q9d84p" },
+  { name: "Nuansa Roleplay Indo", alias: "nuansa", cfx: "bjjob4" },
+  { name: "DayDream Roleplay", alias: "daydream", cfx: "4zqglv" },
+  { name: "Sentra Nusantara RP", alias: "sentra", cfx: "vagdok" },
+  { name: "Kota bagus nusantara RP", alias: "bagus", cfx: "3eqozy" },
+  { name: "Our Glory roleplay", alias: "our", cfx: "55k88a" },
+  { name: "Senjakala roleplay", alias: "senja", cfx: "z5oaqp" },
+  { name: "Hexos Rp", alias: "hexos", cfx: "rmz57j" },
+  { name: "Origami Roleplay", alias: "origami", cfx: "plj9dy" },
+  { name: "indostars Roleplay Indo", alias: "indostars", cfx: "mxzeev" },
+  { name: "Chronicle Roleplay Indo", alias: "chronicle", cfx: "bammal" },
+  { name: "Kotakita Roleplay", alias: "kotakita", cfx: "r35px8" },
+  { name: "Satu Mimpi", alias: "satumimpi", cfx: "3e3gdb" },
+  { name: "Jing Arena Indonesia", alias: "jing", cfx: "53k9ra" },
+  { name: "Senpai arena", alias: "senpai", cfx: "3mg36b" },
+  { name: "caur ffa", alias: "caur", cfx: "vx7685" },
+  { name: "Coffe shop 45", alias: "coffee", cfx: "javo7a" },
+  { name: "Paleto Raceway", alias: "balap", cfx: "adla85" },
 ];
 
 // ================= UTILS =================
@@ -474,3 +510,4 @@ client.on("interactionCreate", async (interaction) => {
 });
 
 client.login(TOKEN);
+
