@@ -133,21 +133,31 @@ function cleanHostname(hostname) {
   return (hostname || "UNKNOWN SERVER").replace(/\^./g, "").trim().toUpperCase();
 }
 
-// jam HH:MM:SS (local mesin bot)
 function nowTime() {
-  const d = new Date();
-  return d.toLocaleTimeString([], { hour12: false });
+  return new Date().toLocaleTimeString([], { hour12: false });
 }
 
 // ================= WATCH SYSTEM =================
 const watchSessions = new Map(); // msgId -> session
 
-// ✅ Lebihin cepat (tapi jangan kebangetan biar ga timeout/rate limit)
 const WATCH_INTERVAL = 5000; // 5 detik
 const WATCH_ITEMS = 20;
 
-// Build embed for watch/find list
-function buildListEmbed({ title, queryLabel, filtered, totalClients, page, totalPages }) {
+// ✅ UI / LOG SETTINGS
+const LOG_MAX = 12; // max baris log tampil
+const LEFT_THRESHOLD = 3; // anti kedip (3x miss) => ~15 detik
+
+// Build embed for watch/find list + Activity Log
+function buildListEmbed({
+  title,
+  queryLabel,
+  filtered,
+  totalClients,
+  page,
+  totalPages,
+  logs = [],
+  clearHint = true,
+}) {
   const list = filtered
     .slice(page * WATCH_ITEMS, (page + 1) * WATCH_ITEMS)
     .map((pl, i) => {
@@ -158,6 +168,8 @@ function buildListEmbed({ title, queryLabel, filtered, totalClients, page, total
     })
     .join("\n");
 
+  const logText = logs.length ? logs.slice(-LOG_MAX).join("\n") : "Belum ada aktivitas.";
+
   return new EmbedBuilder()
     .setColor("#1ABC9C")
     .setTitle(`🎮 ${title.slice(0, 80)}`)
@@ -165,7 +177,9 @@ function buildListEmbed({ title, queryLabel, filtered, totalClients, page, total
       `**Query:** \`${queryLabel}\`\n` +
         `**Ditemukan:** **${filtered.length}** player\n` +
         `\`\`\`\n${list || "Tidak ada player."}\n\`\`\`\n` +
-        `**Total:** ${filtered.length}/${totalClients} players`
+        `**Total:** ${filtered.length}/${totalClients} players\n\n` +
+        `**Activity Log${clearHint ? " (auto-clear saat REFRESH)" : ""}:**\n` +
+        `\`\`\`\n${logText}\n\`\`\``
     )
     .setFooter({ text: `Page ${page + 1}/${totalPages || 1}` })
     .setTimestamp();
@@ -207,7 +221,6 @@ async function refreshWatch(session, messageToEdit) {
   session.totalClients = data.clients || filtered.length;
   session.totalPages = Math.max(1, Math.ceil(filtered.length / WATCH_ITEMS));
 
-  // clamp page
   if (session.page >= session.totalPages) session.page = session.totalPages - 1;
   if (session.page < 0) session.page = 0;
 
@@ -218,6 +231,7 @@ async function refreshWatch(session, messageToEdit) {
     totalClients: session.totalClients,
     page: session.page,
     totalPages: session.totalPages,
+    logs: session.logs || [],
   });
 
   const row = buildWatchRow(session);
@@ -231,51 +245,83 @@ function startWatchLoop(session) {
   if (session.inFlight) return;
 
   session.interval = setInterval(async () => {
-    // anti numpuk kalau request sebelumnya belum selesai
     if (session.inFlight) return;
     session.inFlight = true;
 
     try {
-      const channel = await client.channels.fetch(session.channelId).catch(() => null);
-      if (!channel || !channel.isTextBased()) return;
+      // panel message yang akan diedit
+      const panelMsg = session.panelMessage
+        ? session.panelMessage
+        : await client.channels
+            .fetch(session.channelId)
+            .then((ch) => (ch?.isTextBased() ? ch.messages.fetch(session.messageId) : null))
+            .catch(() => null);
+
+      if (!panelMsg) return;
+      session.panelMessage = panelMsg;
 
       const data = await fetchServer(session.targetId);
       const players = data.players || [];
       const filtered = players.filter((p) => matchesAllTokens(p.name || "", session.tokens));
 
-      // ✅ PAKSA ID JADI STRING biar map cocok terus
+      // key string
       const currentMap = new Map(filtered.map((p) => [String(p.id), p.name || "UNKNOWN"]));
       const beforeMap = session.previousMap || new Map();
 
+      // update last known name + reset miss
+      for (const [id, name] of currentMap.entries()) {
+        session.lastKnownName.set(id, name);
+        session.missCount.delete(id);
+      }
+
+      // JOIN
       const joined = [];
       for (const [id, name] of currentMap.entries()) {
         if (!beforeMap.has(id)) joined.push({ id, name });
       }
 
+      // LEFT debounce
       const left = [];
-      for (const [id, name] of beforeMap.entries()) {
-        if (!currentMap.has(id)) left.push({ id, name });
+      for (const [id] of beforeMap.entries()) {
+        if (currentMap.has(id)) continue;
+
+        const m = (session.missCount.get(id) || 0) + 1;
+        session.missCount.set(id, m);
+
+        if (m >= LEFT_THRESHOLD) {
+          const name = session.lastKnownName.get(id) || "UNKNOWN";
+          left.push({ id, name });
+          session.missCount.delete(id);
+        }
       }
 
-      // update snapshot
+      // update snapshot + list meta
       session.previousMap = currentMap;
+      session.filtered = filtered;
+      session.totalClients = data.clients || filtered.length;
+      session.title = cleanHostname(data.hostname);
+      session.totalPages = Math.max(1, Math.ceil(filtered.length / WATCH_ITEMS));
+      if (session.page >= session.totalPages) session.page = session.totalPages - 1;
 
+      // log masuk embed (bukan spam chat)
       const t = nowTime();
+      for (const p of joined) session.logs.push(`🟢 + (${p.id}) ${p.name} — ${t}`);
+      for (const p of left) session.logs.push(`🔴 - (${p.id}) ${p.name} — ${t}`);
 
-      // notif join/leave + jam
-      if (joined.length > 0) {
-        channel.send(
-          `🟢 **${session.queryLabel.toUpperCase()} JOINED**\n` +
-            joined.map((p) => `+ (${p.id}) ${p.name} — ${t}`).join("\n")
-        );
-      }
+      if (session.logs.length > 200) session.logs = session.logs.slice(-200);
 
-      if (left.length > 0) {
-        channel.send(
-          `🔴 **${session.queryLabel.toUpperCase()} LEFT**\n` +
-            left.map((p) => `- (${p.id}) ${p.name} — ${t}`).join("\n")
-        );
-      }
+      const embed = buildListEmbed({
+        title: session.title,
+        queryLabel: session.queryLabel,
+        filtered: session.filtered,
+        totalClients: session.totalClients,
+        page: session.page,
+        totalPages: session.totalPages,
+        logs: session.logs,
+      });
+
+      const row = buildWatchRow(session);
+      await panelMsg.edit({ embeds: [embed], components: [row] });
     } catch {
       // no spam
     } finally {
@@ -348,7 +394,7 @@ client.on("messageCreate", async (message) => {
   // ===== FIND (TETEP) =====
   if (command === "find") {
     const input = args[0];
-    if (!input) return message.reply("Gunakan `!find <alias>`."); // fix minor
+    if (!input) return message.reply("Gunakan `!find <alias>`."); 
 
     const query = args.slice(1).join(" ");
     const tokens = parseQueryTokens(query);
@@ -375,6 +421,8 @@ client.on("messageCreate", async (message) => {
           totalClients,
           page: p,
           totalPages,
+          logs: [], // FIND ga butuh log
+          clearHint: false,
         });
 
       const row = new ActionRowBuilder().addComponents(
@@ -430,7 +478,7 @@ client.on("messageCreate", async (message) => {
   // ===== WATCH (LIST + PAGING + REFRESH + TRACK) =====
   if (command === "watch") {
     const input = args[0];
-    if (!input) return message.reply("Gunakan `!watch <alias> <query>`."); // fix minor
+    if (!input) return message.reply("Gunakan `!watch <alias> <query>`."); 
 
     const query = args.slice(1).join(" ");
     const tokens = parseQueryTokens(query);
@@ -466,8 +514,16 @@ client.on("messageCreate", async (message) => {
         interval: null,
         inFlight: false,
 
-        // ✅ snapshot Map biar LEFT ada nama + key string
+        // ✅ panel edit target
+        panelMessage: null,
+
+        // ✅ logs di embed (anti spam)
+        logs: [],
+
+        // ✅ snapshot + anti kedip
         previousMap: new Map(filtered.map((p) => [String(p.id), p.name || "UNKNOWN"])),
+        missCount: new Map(),
+        lastKnownName: new Map(filtered.map((p) => [String(p.id), p.name || "UNKNOWN"])),
       };
 
       const embed = buildListEmbed({
@@ -477,10 +533,12 @@ client.on("messageCreate", async (message) => {
         totalClients: session.totalClients,
         page: session.page,
         totalPages: session.totalPages,
+        logs: session.logs,
       });
 
       const temp = await loading.edit({ content: null, embeds: [embed], components: [] });
       session.messageId = temp.id;
+      session.panelMessage = temp;
 
       const row = buildWatchRow(session);
       await temp.edit({ components: [row] });
@@ -518,16 +576,18 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   if (action === "watch_refresh") {
-    // ✅ JANGAN reset snapshot di refresh (ini yang bikin notif ga muncul)
+    // ✅ refresh panel + clear log biar bersih
+    session.logs = [];
+    session.panelMessage = interaction.message;
     await refreshWatch(session, interaction.message);
     return;
   }
 
   if (action === "watch_toggle") {
     session.watchOn = !session.watchOn;
+    session.panelMessage = interaction.message;
 
-    // refresh sekali pas toggle ON biar data paling baru (tapi snapshot jangan dipaksa sama persis)
-    // Kita cuma update panel, snapshot biar loop yang handle join/left.
+    // refresh panel biar data paling baru
     await refreshWatch(session, interaction.message);
 
     if (session.watchOn) startWatchLoop(session);
@@ -547,6 +607,7 @@ client.on("interactionCreate", async (interaction) => {
     totalClients: session.totalClients,
     page: session.page,
     totalPages: session.totalPages,
+    logs: session.logs,
   });
 
   const row = buildWatchRow(session);
