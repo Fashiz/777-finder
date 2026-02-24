@@ -23,7 +23,7 @@ const PREFIX = "!";
 // ================= SERVER DATA =================
 // ⚠️ PASTE LIST SERVER 40 LU DI SINI (yang panjang itu)
 const serverData = [
-  { name: "Indopride Roleplay", alias: "idp", cfx: "237yxy" },
+  { name: "Indopride Roleplay", alias: "idp", cfx: "bak4pl" },
   { name: "Nagara", alias: "nagara", cfx: "d7vrzd" },
   { name: "Nusa V", alias: "nusav", cfx: "ele3bm" },
   { name: "Amora State Indonesia", alias: "amora", cfx: "lk6x85" },
@@ -615,3 +615,4 @@ client.on("interactionCreate", async (interaction) => {
 });
 
 client.login(TOKEN);
+
