@@ -10,14 +10,7 @@ const {
 
 const { fetch, Agent } = require("undici");
 
-// ✅ Keep-alive agent biar fetch lebih irit & responsif
-const httpAgent = new Agent({
-  connections: 20,          // max concurrent sockets
-  pipelining: 1,            // aman buat endpoint ini
-  keepAliveTimeout: 60_000,
-  keepAliveMaxTimeout: 60_000,
-});
-
+// ================= CLIENT =================
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -29,8 +22,16 @@ const client = new Client({
 const TOKEN = process.env.TOKEN;
 const PREFIX = "!";
 
+// ================= HTTP OPTIMIZER =================
+// ✅ Keep-alive agent biar request lebih cepat & stabil
+const httpAgent = new Agent({
+  connections: 20,
+  pipelining: 1,
+  keepAliveTimeout: 60_000,
+  keepAliveMaxTimeout: 60_000,
+});
+
 // ================= SERVER DATA =================
-// ⚠️ PASTE LIST SERVER 40 LU DI SINI (yang panjang itu)
 const serverData = [
   { name: "Indopride Roleplay", alias: "idp", cfx: "bak4pl" },
   { name: "Nagara", alias: "nagara", cfx: "d7vrzd" },
@@ -88,7 +89,7 @@ const parseQueryTokens = (raw) => {
   const s = (raw || "").trim();
   if (!s) return [];
   const tokens = [];
-  const re = /"([^"]+)"|(\S+)/g; // support quotes
+  const re = /"([^"]+)"|(\S+)/g;
   let m;
   while ((m = re.exec(s)) !== null) {
     const t = normalize(m[1] || m[2]);
@@ -116,7 +117,15 @@ function resolveTargetId(input) {
   return found ? found.cfx : input;
 }
 
-// --- fetch timeout helper (biar loop nggak nyangkut lama) ---
+function cleanHostname(hostname) {
+  return (hostname || "UNKNOWN SERVER").replace(/\^./g, "").trim().toUpperCase();
+}
+
+function nowTime() {
+  return new Date().toLocaleTimeString([], { hour12: false });
+}
+
+// ================= FETCH CORE =================
 async function fetchWithTimeout(url, options = {}, timeoutMs = 6500) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
@@ -124,14 +133,14 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 6500) {
     return await fetch(url, {
       ...options,
       signal: controller.signal,
-      dispatcher: httpAgent, // ✅ keep-alive pooling
+      dispatcher: httpAgent,
     });
   } finally {
     clearTimeout(t);
   }
 }
 
-async function fetchServer(targetId) {
+async function fetchServerRaw(targetId) {
   const res = await fetchWithTimeout(
     `https://servers-frontend.fivem.net/api/servers/single/${targetId}`,
     { headers: { "User-Agent": "Mozilla/5.0" } },
@@ -142,15 +151,50 @@ async function fetchServer(targetId) {
   return json.Data;
 }
 
-function cleanHostname(hostname) {
-  return (hostname || "UNKNOWN SERVER").replace(/\^./g, "").trim().toUpperCase();
+// ================= CACHE + ANTI DOUBLE-FETCH =================
+// ✅ ini yang bikin !find sering jadi instant, bukan nunggu fetch lama
+const serverCache = new Map(); 
+// targetId -> { ts:number, data:object, inFlight?:Promise<object> }
+
+const CACHE_TTL_MS = 7000;
+
+async function fetchServerSmart(targetId) {
+  const now = Date.now();
+  const cached = serverCache.get(targetId);
+
+  // fresh cache
+  if (cached?.data && now - cached.ts <= CACHE_TTL_MS) {
+    return cached.data;
+  }
+
+  // if in-flight already, await it (anti dobel fetch)
+  if (cached?.inFlight) {
+    return await cached.inFlight;
+  }
+
+  const p = (async () => {
+    const data = await fetchServerRaw(targetId);
+    serverCache.set(targetId, { ts: Date.now(), data });
+    return data;
+  })();
+
+  serverCache.set(targetId, {
+    ts: cached?.ts || 0,
+    data: cached?.data,
+    inFlight: p,
+  });
+
+  try {
+    return await p;
+  } finally {
+    const cur = serverCache.get(targetId);
+    if (cur?.inFlight === p) {
+      serverCache.set(targetId, { ts: cur.ts, data: cur.data });
+    }
+  }
 }
 
-function nowTime() {
-  return new Date().toLocaleTimeString([], { hour12: false });
-}
-
-// ✅ Map-limit tanpa dependency biar !server gak ngegas 40 request barengan
+// ================= MAP LIMIT (NO DEP) =================
 async function mapLimit(items, limit, mapper) {
   const results = new Array(items.length);
   let idx = 0;
@@ -170,15 +214,14 @@ async function mapLimit(items, limit, mapper) {
 // ================= WATCH SYSTEM =================
 const watchSessions = new Map(); // msgId -> session
 
-const WATCH_INTERVAL = 5000; // 5 detik
+const WATCH_INTERVAL = 5000;
 const WATCH_ITEMS = 20;
 
-// ✅ UI / LOG SETTINGS
-const LOG_MAX = 12; // max baris log tampil
-const LEFT_THRESHOLD = 3; // anti kedip (3x miss) => ~15 detik
+const LOG_MAX = 12;
+const LEFT_THRESHOLD = 3;
 
-// ✅ Shared poller per targetId biar gak fetch berkali-kali kalau watchnya banyak
-const targetPollers = new Map(); // targetId -> { timer, inFlight, sessions:Set<msgId> }
+// ✅ 1 server = 1 poller
+const targetPollers = new Map(); // targetId -> { timer, inFlight, sessions:Set<string> }
 
 function ensureTargetPoller(targetId) {
   if (targetPollers.has(targetId)) return targetPollers.get(targetId);
@@ -190,26 +233,22 @@ function ensureTargetPoller(targetId) {
   };
 
   async function tick() {
-    poller.timer = null; // clear "scheduled" flag
+    poller.timer = null;
 
-    if (poller.inFlight) {
-      scheduleNext();
-      return;
-    }
+    if (poller.inFlight) return scheduleNext();
     if (poller.sessions.size === 0) return;
 
     poller.inFlight = true;
     try {
-      const data = await fetchServer(targetId);
+      // ✅ shared fetch + cache (kalau barengan juga aman)
+      const data = await fetchServerSmart(targetId);
       const players = data.players || [];
 
-      // update semua session yang nonton targetId ini
       for (const msgId of poller.sessions) {
         const session = watchSessions.get(msgId);
         if (!session || !session.watchOn) continue;
 
         const filtered = players.filter((p) => matchesAllTokens(p.name || "", session.tokens));
-
         const currentMap = new Map(filtered.map((p) => [String(p.id), p.name || "UNKNOWN"]));
         const beforeMap = session.previousMap || new Map();
 
@@ -248,13 +287,12 @@ function ensureTargetPoller(targetId) {
         session.totalPages = Math.max(1, Math.ceil(filtered.length / WATCH_ITEMS));
         if (session.page >= session.totalPages) session.page = session.totalPages - 1;
 
-        // log masuk embed (bukan spam chat)
         const t = nowTime();
         for (const p of joined) session.logs.push(`🟢 + (${p.id}) ${p.name} — ${t}`);
         for (const p of left) session.logs.push(`🔴 - (${p.id}) ${p.name} — ${t}`);
         if (session.logs.length > 200) session.logs = session.logs.slice(-200);
 
-        // ✅ Kalau gak ada perubahan join/left & list count sama & page tetap, skip edit (lebih responsif)
+        // ✅ skip edit kalau gak ada perubahan penting
         const changed = joined.length > 0 || left.length > 0;
         const countChanged = session._lastCount !== filtered.length;
         const titleChanged = session._lastTitle !== session.title;
@@ -264,7 +302,6 @@ function ensureTargetPoller(targetId) {
         session._lastCount = filtered.length;
         session._lastTitle = session.title;
 
-        // ambil panel message
         const panelMsg = session.panelMessage
           ? session.panelMessage
           : await client.channels
@@ -299,10 +336,10 @@ function ensureTargetPoller(targetId) {
   function scheduleNext() {
     if (poller.sessions.size === 0) return;
     if (poller.timer) return;
-    poller.timer = setTimeout(tick, WATCH_INTERVAL); // ✅ setTimeout chain (lebih stabil)
+    poller.timer = setTimeout(tick, WATCH_INTERVAL);
   }
 
-  poller.start = () => scheduleNext();
+  poller.start = scheduleNext;
   poller.stopIfIdle = () => {
     if (poller.sessions.size === 0 && poller.timer) {
       clearTimeout(poller.timer);
@@ -314,7 +351,7 @@ function ensureTargetPoller(targetId) {
   return poller;
 }
 
-// Build embed for watch/find list + Activity Log
+// ================= EMBEDS & BUTTONS =================
 function buildListEmbed({
   title,
   queryLabel,
@@ -379,7 +416,7 @@ function buildWatchRow(session) {
 }
 
 async function refreshWatch(session, messageToEdit) {
-  const data = await fetchServer(session.targetId);
+  const data = await fetchServerSmart(session.targetId);
   const players = data.players || [];
   const filtered = players.filter((p) => matchesAllTokens(p.name || "", session.tokens));
 
@@ -391,7 +428,6 @@ async function refreshWatch(session, messageToEdit) {
   if (session.page >= session.totalPages) session.page = session.totalPages - 1;
   if (session.page < 0) session.page = 0;
 
-  // ✅ cache last meta for "skip edit" logic
   session._lastCount = filtered.length;
   session._lastTitle = session.title;
 
@@ -424,7 +460,15 @@ function stopWatchLoop(session) {
 }
 
 // ================= READY =================
-client.on("ready", () => console.log(`🚀 Connected as ${client.user.tag}`));
+client.on("ready", async () => {
+  console.log(`🚀 Connected as ${client.user.tag}`);
+
+  // ✅ optional: prewarm server populer biar command pertama gak berat
+  const warm = ["bak4pl", "d7vrzd", "ele3bm"]; // idp, nagara, nusav
+  for (const id of warm) {
+    fetchServerSmart(id).catch(() => null);
+  }
+});
 
 // ================= COMMAND HANDLER =================
 client.on("messageCreate", async (message) => {
@@ -433,16 +477,15 @@ client.on("messageCreate", async (message) => {
   const args = message.content.slice(PREFIX.length).trim().split(/ +/);
   const command = (args.shift() || "").toLowerCase();
 
-  // ===== SERVER (STYLE LAMA, tapi optimized) =====
+  // ===== SERVER =====
   if (command === "server") {
     const loadingMsg = await message.reply("`🔄 Fetching real-time leaderboard data...`");
     try {
-      // ✅ limit concurrency biar gak ngelag
       const CONCURRENCY = 6;
 
       const results = await mapLimit(serverData, CONCURRENCY, async (s) => {
         try {
-          const data = await fetchServer(s.cfx);
+          const data = await fetchServerSmart(s.cfx);
           return { ...s, players: data?.clients || 0, status: true };
         } catch {
           return { ...s, players: 0, status: false };
@@ -477,7 +520,7 @@ client.on("messageCreate", async (message) => {
     }
   }
 
-  // ===== FIND (TETEP) =====
+  // ===== FIND =====
   if (command === "find") {
     const input = args[0];
     if (!input) return message.reply("Gunakan `!find <alias>`."); 
@@ -488,7 +531,9 @@ client.on("messageCreate", async (message) => {
 
     try {
       const loading = await message.reply("`Syncing data...`");
-      const data = await fetchServer(targetId);
+
+      // ✅ smart fetch (cache + keepalive + anti double-fetch)
+      const data = await fetchServerSmart(targetId);
 
       const players = data.players || [];
       const filtered = players.filter((p) => matchesAllTokens(p.name || "", tokens));
@@ -507,7 +552,7 @@ client.on("messageCreate", async (message) => {
           totalClients,
           page: p,
           totalPages,
-          logs: [], // FIND ga butuh log
+          logs: [],
           clearHint: false,
         });
 
@@ -561,7 +606,7 @@ client.on("messageCreate", async (message) => {
     }
   }
 
-  // ===== WATCH (LIST + PAGING + REFRESH + TRACK) =====
+  // ===== WATCH =====
   if (command === "watch") {
     const input = args[0];
     if (!input) return message.reply("Gunakan `!watch <alias> <query>`."); 
@@ -573,8 +618,8 @@ client.on("messageCreate", async (message) => {
 
     try {
       const loading = await message.reply("`Creating watch panel...`");
-      const data = await fetchServer(targetId);
 
+      const data = await fetchServerSmart(targetId);
       const players = data.players || [];
       const filtered = players.filter((p) => matchesAllTokens(p.name || "", tokens));
 
@@ -598,18 +643,13 @@ client.on("messageCreate", async (message) => {
 
         watchOn: false,
 
-        // ✅ panel edit target
         panelMessage: null,
-
-        // ✅ logs di embed (anti spam)
         logs: [],
 
-        // ✅ snapshot + anti kedip
         previousMap: new Map(filtered.map((p) => [String(p.id), p.name || "UNKNOWN"])),
         missCount: new Map(),
         lastKnownName: new Map(filtered.map((p) => [String(p.id), p.name || "UNKNOWN"])),
 
-        // ✅ for skip edit
         _lastCount: filtered.length,
         _lastTitle: cleanHostname(data.hostname),
       };
@@ -664,7 +704,6 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   if (action === "watch_refresh") {
-    // ✅ refresh panel + clear log biar bersih
     session.logs = [];
     session.panelMessage = interaction.message;
     await refreshWatch(session, interaction.message);
@@ -675,19 +714,16 @@ client.on("interactionCreate", async (interaction) => {
     session.watchOn = !session.watchOn;
     session.panelMessage = interaction.message;
 
-    // refresh panel biar data paling baru
     await refreshWatch(session, interaction.message);
 
     if (session.watchOn) startWatchLoop(session);
     else stopWatchLoop(session);
 
-    // update tombol label
     const row = buildWatchRow(session);
     await interaction.message.edit({ components: [row] });
     return;
   }
 
-  // update embed on page change (tanpa fetch biar cepet)
   const embed = buildListEmbed({
     title: session.title,
     queryLabel: session.queryLabel,
