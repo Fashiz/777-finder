@@ -7,7 +7,16 @@ const {
   ButtonBuilder,
   ButtonStyle,
 } = require("discord.js");
-const { fetch } = require("undici");
+
+const { fetch, Agent } = require("undici");
+
+// ✅ Keep-alive agent biar fetch lebih irit & responsif
+const httpAgent = new Agent({
+  connections: 20,          // max concurrent sockets
+  pipelining: 1,            // aman buat endpoint ini
+  keepAliveTimeout: 60_000,
+  keepAliveMaxTimeout: 60_000,
+});
 
 const client = new Client({
   intents: [
@@ -112,7 +121,11 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 6500) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+      dispatcher: httpAgent, // ✅ keep-alive pooling
+    });
   } finally {
     clearTimeout(t);
   }
@@ -137,6 +150,23 @@ function nowTime() {
   return new Date().toLocaleTimeString([], { hour12: false });
 }
 
+// ✅ Map-limit tanpa dependency biar !server gak ngegas 40 request barengan
+async function mapLimit(items, limit, mapper) {
+  const results = new Array(items.length);
+  let idx = 0;
+
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const i = idx++;
+      if (i >= items.length) break;
+      results[i] = await mapper(items[i], i);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
+}
+
 // ================= WATCH SYSTEM =================
 const watchSessions = new Map(); // msgId -> session
 
@@ -146,6 +176,143 @@ const WATCH_ITEMS = 20;
 // ✅ UI / LOG SETTINGS
 const LOG_MAX = 12; // max baris log tampil
 const LEFT_THRESHOLD = 3; // anti kedip (3x miss) => ~15 detik
+
+// ✅ Shared poller per targetId biar gak fetch berkali-kali kalau watchnya banyak
+const targetPollers = new Map(); // targetId -> { timer, inFlight, sessions:Set<msgId> }
+
+function ensureTargetPoller(targetId) {
+  if (targetPollers.has(targetId)) return targetPollers.get(targetId);
+
+  const poller = {
+    timer: null,
+    inFlight: false,
+    sessions: new Set(),
+  };
+
+  async function tick() {
+    poller.timer = null; // clear "scheduled" flag
+
+    if (poller.inFlight) {
+      scheduleNext();
+      return;
+    }
+    if (poller.sessions.size === 0) return;
+
+    poller.inFlight = true;
+    try {
+      const data = await fetchServer(targetId);
+      const players = data.players || [];
+
+      // update semua session yang nonton targetId ini
+      for (const msgId of poller.sessions) {
+        const session = watchSessions.get(msgId);
+        if (!session || !session.watchOn) continue;
+
+        const filtered = players.filter((p) => matchesAllTokens(p.name || "", session.tokens));
+
+        const currentMap = new Map(filtered.map((p) => [String(p.id), p.name || "UNKNOWN"]));
+        const beforeMap = session.previousMap || new Map();
+
+        // update last known name + reset miss
+        for (const [id, name] of currentMap.entries()) {
+          session.lastKnownName.set(id, name);
+          session.missCount.delete(id);
+        }
+
+        // JOIN
+        const joined = [];
+        for (const [id, name] of currentMap.entries()) {
+          if (!beforeMap.has(id)) joined.push({ id, name });
+        }
+
+        // LEFT debounce
+        const left = [];
+        for (const [id] of beforeMap.entries()) {
+          if (currentMap.has(id)) continue;
+
+          const m = (session.missCount.get(id) || 0) + 1;
+          session.missCount.set(id, m);
+
+          if (m >= LEFT_THRESHOLD) {
+            const name = session.lastKnownName.get(id) || "UNKNOWN";
+            left.push({ id, name });
+            session.missCount.delete(id);
+          }
+        }
+
+        // update snapshot + meta
+        session.previousMap = currentMap;
+        session.filtered = filtered;
+        session.totalClients = data.clients || filtered.length;
+        session.title = cleanHostname(data.hostname);
+        session.totalPages = Math.max(1, Math.ceil(filtered.length / WATCH_ITEMS));
+        if (session.page >= session.totalPages) session.page = session.totalPages - 1;
+
+        // log masuk embed (bukan spam chat)
+        const t = nowTime();
+        for (const p of joined) session.logs.push(`🟢 + (${p.id}) ${p.name} — ${t}`);
+        for (const p of left) session.logs.push(`🔴 - (${p.id}) ${p.name} — ${t}`);
+        if (session.logs.length > 200) session.logs = session.logs.slice(-200);
+
+        // ✅ Kalau gak ada perubahan join/left & list count sama & page tetap, skip edit (lebih responsif)
+        const changed = joined.length > 0 || left.length > 0;
+        const countChanged = session._lastCount !== filtered.length;
+        const titleChanged = session._lastTitle !== session.title;
+
+        if (!changed && !countChanged && !titleChanged) continue;
+
+        session._lastCount = filtered.length;
+        session._lastTitle = session.title;
+
+        // ambil panel message
+        const panelMsg = session.panelMessage
+          ? session.panelMessage
+          : await client.channels
+              .fetch(session.channelId)
+              .then((ch) => (ch?.isTextBased() ? ch.messages.fetch(session.messageId) : null))
+              .catch(() => null);
+
+        if (!panelMsg) continue;
+        session.panelMessage = panelMsg;
+
+        const embed = buildListEmbed({
+          title: session.title,
+          queryLabel: session.queryLabel,
+          filtered: session.filtered,
+          totalClients: session.totalClients,
+          page: session.page,
+          totalPages: session.totalPages,
+          logs: session.logs,
+        });
+
+        const row = buildWatchRow(session);
+        await panelMsg.edit({ embeds: [embed], components: [row] }).catch(() => null);
+      }
+    } catch {
+      // no spam
+    } finally {
+      poller.inFlight = false;
+      scheduleNext();
+    }
+  }
+
+  function scheduleNext() {
+    if (poller.sessions.size === 0) return;
+    if (poller.timer) return;
+    poller.timer = setTimeout(tick, WATCH_INTERVAL); // ✅ setTimeout chain (lebih stabil)
+  }
+
+  poller.start = () => scheduleNext();
+  poller.stopIfIdle = () => {
+    if (poller.sessions.size === 0 && poller.timer) {
+      clearTimeout(poller.timer);
+      poller.timer = null;
+    }
+  };
+
+  targetPollers.set(targetId, poller);
+  return poller;
+}
 
 // Build embed for watch/find list + Activity Log
 function buildListEmbed({
@@ -224,6 +391,10 @@ async function refreshWatch(session, messageToEdit) {
   if (session.page >= session.totalPages) session.page = session.totalPages - 1;
   if (session.page < 0) session.page = 0;
 
+  // ✅ cache last meta for "skip edit" logic
+  session._lastCount = filtered.length;
+  session._lastTitle = session.title;
+
   const embed = buildListEmbed({
     title: session.title,
     queryLabel: session.queryLabel,
@@ -241,101 +412,15 @@ async function refreshWatch(session, messageToEdit) {
 }
 
 function startWatchLoop(session) {
-  if (session.interval) clearInterval(session.interval);
-  if (session.inFlight) return;
-
-  session.interval = setInterval(async () => {
-    if (session.inFlight) return;
-    session.inFlight = true;
-
-    try {
-      // panel message yang akan diedit
-      const panelMsg = session.panelMessage
-        ? session.panelMessage
-        : await client.channels
-            .fetch(session.channelId)
-            .then((ch) => (ch?.isTextBased() ? ch.messages.fetch(session.messageId) : null))
-            .catch(() => null);
-
-      if (!panelMsg) return;
-      session.panelMessage = panelMsg;
-
-      const data = await fetchServer(session.targetId);
-      const players = data.players || [];
-      const filtered = players.filter((p) => matchesAllTokens(p.name || "", session.tokens));
-
-      // key string
-      const currentMap = new Map(filtered.map((p) => [String(p.id), p.name || "UNKNOWN"]));
-      const beforeMap = session.previousMap || new Map();
-
-      // update last known name + reset miss
-      for (const [id, name] of currentMap.entries()) {
-        session.lastKnownName.set(id, name);
-        session.missCount.delete(id);
-      }
-
-      // JOIN
-      const joined = [];
-      for (const [id, name] of currentMap.entries()) {
-        if (!beforeMap.has(id)) joined.push({ id, name });
-      }
-
-      // LEFT debounce
-      const left = [];
-      for (const [id] of beforeMap.entries()) {
-        if (currentMap.has(id)) continue;
-
-        const m = (session.missCount.get(id) || 0) + 1;
-        session.missCount.set(id, m);
-
-        if (m >= LEFT_THRESHOLD) {
-          const name = session.lastKnownName.get(id) || "UNKNOWN";
-          left.push({ id, name });
-          session.missCount.delete(id);
-        }
-      }
-
-      // update snapshot + list meta
-      session.previousMap = currentMap;
-      session.filtered = filtered;
-      session.totalClients = data.clients || filtered.length;
-      session.title = cleanHostname(data.hostname);
-      session.totalPages = Math.max(1, Math.ceil(filtered.length / WATCH_ITEMS));
-      if (session.page >= session.totalPages) session.page = session.totalPages - 1;
-
-      // log masuk embed (bukan spam chat)
-      const t = nowTime();
-      for (const p of joined) session.logs.push(`🟢 + (${p.id}) ${p.name} — ${t}`);
-      for (const p of left) session.logs.push(`🔴 - (${p.id}) ${p.name} — ${t}`);
-
-      if (session.logs.length > 200) session.logs = session.logs.slice(-200);
-
-      const embed = buildListEmbed({
-        title: session.title,
-        queryLabel: session.queryLabel,
-        filtered: session.filtered,
-        totalClients: session.totalClients,
-        page: session.page,
-        totalPages: session.totalPages,
-        logs: session.logs,
-      });
-
-      const row = buildWatchRow(session);
-      await panelMsg.edit({ embeds: [embed], components: [row] });
-    } catch {
-      // no spam
-    } finally {
-      session.inFlight = false;
-    }
-  }, WATCH_INTERVAL);
+  const poller = ensureTargetPoller(session.targetId);
+  poller.sessions.add(session.messageId);
+  poller.start();
 }
 
 function stopWatchLoop(session) {
-  if (session.interval) {
-    clearInterval(session.interval);
-    session.interval = null;
-  }
-  session.inFlight = false;
+  const poller = ensureTargetPoller(session.targetId);
+  poller.sessions.delete(session.messageId);
+  poller.stopIfIdle();
 }
 
 // ================= READY =================
@@ -348,20 +433,21 @@ client.on("messageCreate", async (message) => {
   const args = message.content.slice(PREFIX.length).trim().split(/ +/);
   const command = (args.shift() || "").toLowerCase();
 
-  // ===== SERVER (STYLE LAMA) =====
+  // ===== SERVER (STYLE LAMA, tapi optimized) =====
   if (command === "server") {
     const loadingMsg = await message.reply("`🔄 Fetching real-time leaderboard data...`");
     try {
-      const results = await Promise.all(
-        serverData.map(async (s) => {
-          try {
-            const data = await fetchServer(s.cfx);
-            return { ...s, players: data?.clients || 0, status: true };
-          } catch {
-            return { ...s, players: 0, status: false };
-          }
-        })
-      );
+      // ✅ limit concurrency biar gak ngelag
+      const CONCURRENCY = 6;
+
+      const results = await mapLimit(serverData, CONCURRENCY, async (s) => {
+        try {
+          const data = await fetchServer(s.cfx);
+          return { ...s, players: data?.clients || 0, status: true };
+        } catch {
+          return { ...s, players: 0, status: false };
+        }
+      });
 
       results.sort((a, b) => b.players - a.players);
 
@@ -511,8 +597,6 @@ client.on("messageCreate", async (message) => {
         totalPages: Math.max(1, Math.ceil(filtered.length / WATCH_ITEMS)),
 
         watchOn: false,
-        interval: null,
-        inFlight: false,
 
         // ✅ panel edit target
         panelMessage: null,
@@ -524,6 +608,10 @@ client.on("messageCreate", async (message) => {
         previousMap: new Map(filtered.map((p) => [String(p.id), p.name || "UNKNOWN"])),
         missCount: new Map(),
         lastKnownName: new Map(filtered.map((p) => [String(p.id), p.name || "UNKNOWN"])),
+
+        // ✅ for skip edit
+        _lastCount: filtered.length,
+        _lastTitle: cleanHostname(data.hostname),
       };
 
       const embed = buildListEmbed({
@@ -615,4 +703,3 @@ client.on("interactionCreate", async (interaction) => {
 });
 
 client.login(TOKEN);
-
